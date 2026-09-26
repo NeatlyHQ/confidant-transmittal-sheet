@@ -542,8 +542,12 @@ function todayStr(){
   return d.toLocaleDateString(undefined,{year:'numeric',month:'long',day:'numeric'});
 }
 
+function normalizeControlPrefix(prefix){
+  return (prefix||'TRN').trim().toUpperCase().slice(0,10) || 'TRN';
+}
+
 function genControlNumber(prefix){
-  const p=(prefix||'TRN').trim().slice(0,10).toUpperCase() || 'TRN';
+  const p=normalizeControlPrefix(prefix);
   const y=new Date().getFullYear();
   const rand=Array.from(crypto.getRandomValues(new Uint8Array(4)))
     .map(b=>b.toString(36).toUpperCase()).join('').slice(0,4);
@@ -578,34 +582,48 @@ function validateHandlingForExport(){
 
 /* ---------------- rendering ---------------- */
 function wrapText(ctx, text, maxWidth){
-  const words = String(text).split(/\s+/).filter(Boolean);
+  const source = String(text);
+  if(!source) return [];
   const lines = [];
-  let line = '';
-  // split a single word wider than maxWidth, character by character
-  function breakWord(w){
-    let chunk = '';
-    for(const ch of w){
-      if(ctx.measureText(chunk + ch).width > maxWidth && chunk){
-        lines.push(chunk); chunk = ch;
-      } else chunk += ch;
+
+  function wrapParagraph(paragraph){
+    const words = paragraph.split(/[^\S\r\n]+/).filter(Boolean);
+    let line = '';
+    // split a single word wider than maxWidth, character by character
+    function breakWord(w){
+      let chunk = '';
+      for(const ch of w){
+        if(ctx.measureText(chunk + ch).width > maxWidth && chunk){
+          lines.push(chunk); chunk = ch;
+        } else chunk += ch;
+      }
+      return chunk;
     }
-    return chunk;
-  }
-  for(const w of words){
-    let word = w;
-    if(ctx.measureText(word).width > maxWidth){
-      if(line){ lines.push(line); line = ''; }
-      word = breakWord(word); // last chunk continues as current word
+    for(const w of words){
+      let word = w;
+      if(ctx.measureText(word).width > maxWidth){
+        if(line){ lines.push(line); line = ''; }
+        word = breakWord(word); // last chunk continues as current word
+      }
+      const test = line ? line+' '+word : word;
+      if(ctx.measureText(test).width > maxWidth && line){ lines.push(line); line = word; }
+      else line = test;
     }
-    const test = line ? line+' '+word : word;
-    if(ctx.measureText(test).width > maxWidth && line){ lines.push(line); line = word; }
-    else line = test;
+    if(line) lines.push(line);
   }
-  if(line) lines.push(line);
+
+  const paragraphs = source.split(/\r\n|\r|\n/);
+  paragraphs.forEach((paragraph, index)=>{
+    if(paragraph) wrapParagraph(paragraph);
+    else lines.push('');
+    // A hard line break is represented by the boundary between paragraphs;
+    // an empty paragraph preserves an intentionally blank line.
+  });
   return lines;
 }
 
 function renderSheet(){
+  refreshControlNumber();
   const cv = $('sheetCanvas');
   const ctx = cv.getContext('2d');
   const W = cv.width, H = cv.height;
@@ -644,13 +662,13 @@ function renderSheet(){
   ctx.font = '700 30px Georgia, serif';
   const title = ($('docTitle').value.trim()||'Untitled Document').slice(0,120);
   const titleLines = wrapText(ctx, title, W-2*marginX);
-  titleLines.slice(0,3).forEach(l=>{ ctx.fillText(l, W/2, y); y+=36; });
+  titleLines.forEach(l=>{ ctx.fillText(l, W/2, y); y+=36; });
   y += 6;
 
   const codename = $('codename').value.trim().slice(0,80);
   if(codename){
     ctx.font = 'italic 16px Georgia, serif'; ctx.fillStyle = MUTED;
-    wrapText(ctx, 'Engagement: '+codename, W-2*marginX).slice(0,2)
+    wrapText(ctx, 'Engagement: '+codename, W-2*marginX)
       .forEach(l=>{ ctx.fillText(l, W/2, y); y += 20; });
     y += 14;
   } else { y += 12; }
@@ -667,16 +685,16 @@ function renderSheet(){
   ctx.fillText('TO', marginX+colW+40, y);
   y += 22;
   ctx.font = '600 17px Helvetica, Arial, sans-serif'; ctx.fillStyle = INK;
-  const senderLines = wrapText(ctx, ($('senderName').value.trim()||'—').slice(0,80), colW).slice(0,2);
-  const recipientLines = wrapText(ctx, ($('recipientName').value.trim()||'—').slice(0,80), colW).slice(0,2);
+  const senderLines = wrapText(ctx, ($('senderName').value.trim()||'—').slice(0,80), colW);
+  const recipientLines = wrapText(ctx, ($('recipientName').value.trim()||'—').slice(0,80), colW);
   let yName = y;
   senderLines.forEach(l=>{ ctx.fillText(l, marginX, yName); yName += 20; });
   yName = y;
   recipientLines.forEach(l=>{ ctx.fillText(l, marginX+colW+40, yName); yName += 20; });
   y += 20 * Math.max(senderLines.length, recipientLines.length);
   ctx.font = '15px Helvetica, Arial, sans-serif'; ctx.fillStyle = MUTED;
-  const senderFirmLines = wrapText(ctx, ($('senderFirm').value.trim()||'').slice(0,80), colW).slice(0,2);
-  const recipientFirmLines = wrapText(ctx, ($('recipientFirm').value.trim()||'').slice(0,80), colW).slice(0,2);
+  const senderFirmLines = wrapText(ctx, ($('senderFirm').value.trim()||'').slice(0,80), colW);
+  const recipientFirmLines = wrapText(ctx, ($('recipientFirm').value.trim()||'').slice(0,80), colW);
   let yFirm = y;
   senderFirmLines.forEach(l=>{ ctx.fillText(l, marginX, yFirm); yFirm += 18; });
   yFirm = y;
@@ -774,18 +792,23 @@ $('handlingPreset').addEventListener('change', ()=>{
   scheduleRender();
 });
 
-let lastPrefixNormalized = ($('ctrlPrefix').value||'TRN').trim().slice(0,10).toUpperCase() || 'TRN';
+let lastPrefixNormalized = normalizeControlPrefix($('ctrlPrefix').value);
 
-$('ctrlPrefix').addEventListener('input', scheduleRender);
-
-$('ctrlPrefix').addEventListener('change', ()=>{
-  const p = ($('ctrlPrefix').value||'TRN').trim().slice(0,10).toUpperCase() || 'TRN';
+function refreshControlNumber(){
+  const p = normalizeControlPrefix($('ctrlPrefix').value);
   if(p !== lastPrefixNormalized){
     lastPrefixNormalized = p;
     cachedControlNumber = genControlNumber(p);
   }
+}
+
+function syncControlNumberToPrefix(){
+  refreshControlNumber();
   scheduleRender();
-});
+}
+
+$('ctrlPrefix').addEventListener('input', syncControlNumberToPrefix);
+$('ctrlPrefix').addEventListener('change', syncControlNumberToPrefix);
 
 function msg(kind, text){
   const el = $('exportMsg');
